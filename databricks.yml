@@ -1,0 +1,55 @@
+# GMR Mosaic AI Agent Demo - Databricks Asset Bundle
+# Showcases end-to-end Mosaic AI agent development lifecycle
+
+bundle:
+  name: gmr-mosaic-ai-demo
+
+variables:
+  catalog:
+    description: "Unity Catalog name for GMR demo"
+    default: gmr_demo
+  schema:
+    description: "Schema name for royalties data"
+    default: royalties
+  warehouse_id:
+    description: "Serverless SQL Warehouse ID"
+    default: ""
+
+include:
+  - resources/*.yml
+
+workspace:
+  root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
+artifacts:
+  gmr_agent:
+    type: whl
+    path: ./src
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: ${var.workspace_host}
+    variables:
+      catalog: gmr_demo_dev
+      schema: royalties
+
+  staging:
+    mode: development
+    workspace:
+      host: ${var.workspace_host}
+    variables:
+      catalog: gmr_demo_staging
+      schema: royalties
+
+  prod:
+    mode: production
+    workspace:
+      host: ${var.workspace_host}
+    variables:
+      catalog: gmr_demo
+      schema: royalties
+    run_as:
+      service_principal_name: gmr-demo-sp

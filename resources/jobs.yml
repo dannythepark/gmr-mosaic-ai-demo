@@ -1,0 +1,116 @@
+# GMR Mosaic AI Demo - Workflow Definitions
+
+resources:
+  jobs:
+    # Data pipeline job - runs notebooks 01-04 in sequence
+    gmr_data_pipeline:
+      name: "[${bundle.target}] GMR Data Pipeline"
+      description: "End-to-end data preparation pipeline for GMR demo"
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: America/New_York
+        pause_status: PAUSED
+      tasks:
+        - task_key: data_generation
+          notebook_task:
+            notebook_path: ../src/01_data_generation.py
+            source: WORKSPACE
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            num_workers: 2
+            node_type_id: "i3.xlarge"
+            data_security_mode: "SINGLE_USER"
+
+        - task_key: data_ingestion
+          depends_on:
+            - task_key: data_generation
+          notebook_task:
+            notebook_path: ../src/02_data_ingestion.py
+            source: WORKSPACE
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            num_workers: 2
+            node_type_id: "i3.xlarge"
+            data_security_mode: "SINGLE_USER"
+
+        - task_key: feature_engineering
+          depends_on:
+            - task_key: data_ingestion
+          notebook_task:
+            notebook_path: ../src/03_feature_engineering.py
+            source: WORKSPACE
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            num_workers: 2
+            node_type_id: "i3.xlarge"
+            data_security_mode: "SINGLE_USER"
+
+        - task_key: vector_index
+          depends_on:
+            - task_key: feature_engineering
+          notebook_task:
+            notebook_path: ../src/04_vector_index.py
+            source: WORKSPACE
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            num_workers: 1
+            node_type_id: "i3.xlarge"
+            data_security_mode: "SINGLE_USER"
+
+    # Agent setup job - creates tools and builds agent
+    gmr_agent_setup:
+      name: "[${bundle.target}] GMR Agent Setup"
+      description: "Set up UC functions, build and register the Mosaic AI agent"
+      tasks:
+        - task_key: create_agent_tools
+          notebook_task:
+            notebook_path: ../src/06_agent_tools.sql
+            source: WORKSPACE
+            warehouse_id: ${var.warehouse_id}
+
+        - task_key: build_agent
+          depends_on:
+            - task_key: create_agent_tools
+          notebook_task:
+            notebook_path: ../src/07_build_agent.py
+            source: WORKSPACE
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            num_workers: 1
+            node_type_id: "i3.xlarge"
+            data_security_mode: "SINGLE_USER"
+
+        - task_key: evaluate_agent
+          depends_on:
+            - task_key: build_agent
+          notebook_task:
+            notebook_path: ../src/08_evaluate_agent.py
+            source: WORKSPACE
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            num_workers: 1
+            node_type_id: "i3.xlarge"
+            data_security_mode: "SINGLE_USER"
+
+        - task_key: deploy_agent
+          depends_on:
+            - task_key: evaluate_agent
+          notebook_task:
+            notebook_path: ../src/09_deploy_agent.py
+            source: WORKSPACE
+          new_cluster:
+            spark_version: "15.4.x-scala2.12"
+            num_workers: 1
+            node_type_id: "i3.xlarge"
+            data_security_mode: "SINGLE_USER"
+
+    # AI Functions demo - standalone SQL notebook
+    gmr_ai_functions_demo:
+      name: "[${bundle.target}] GMR AI Functions Demo"
+      description: "Showcase AI Functions (ai_query, ai_classify, ai_extract)"
+      tasks:
+        - task_key: ai_functions
+          notebook_task:
+            notebook_path: ../src/05_ai_functions.sql
+            source: WORKSPACE
+            warehouse_id: ${var.warehouse_id}
