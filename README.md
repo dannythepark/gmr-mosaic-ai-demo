@@ -89,20 +89,6 @@ This demo showcases how to build, evaluate, deploy, and govern an AI agent using
    - Start with `01_data_generation.py` to create sample data
    - Progress through each notebook sequentially
 
-### Demo Walkthrough (~45 minutes)
-
-| Time | Notebook | Description |
-|------|----------|-------------|
-| 0-5 min | `01_data_generation.py` | Create sample tables |
-| 5-10 min | `02_data_ingestion.py` | Show Auto Loader patterns |
-| 10-15 min | `03_feature_engineering.py` | Build Feature Store tables |
-| 15-20 min | `04_vector_index.py` | Create vector search index |
-| 20-25 min | `05_ai_functions.sql` | Demo AI Functions in SQL |
-| 25-30 min | `06_agent_tools.sql` | Create UC function tools |
-| 30-35 min | `07_build_agent.py` | Build and register agent |
-| 35-40 min | `08_evaluate_agent.py` | Run LLM-judge evaluation |
-| 40-45 min | `09_deploy_agent.py` | Deploy to Model Serving |
-
 ## Project Structure
 
 ```
