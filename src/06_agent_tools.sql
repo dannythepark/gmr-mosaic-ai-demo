@@ -13,7 +13,11 @@
 -- MAGIC | `search_song_catalog` | Semantic search for songs (uses Vector Search) |
 -- MAGIC | `calculate_royalty_split` | Calculate per-songwriter payment breakdown |
 -- MAGIC | `get_licensing_summary` | Get licensing stats for a song or artist |
--- MAGIC | `flag_payment_anomaly` | Detect unusual payment patterns |
+-- MAGIC | `lookup_songwriter_earnings` | Get earnings summary for a songwriter |
+-- MAGIC | `get_top_royalty_songs` | Ranked list of highest-earning songs |
+-- MAGIC | `get_catalog_overview` | High-level portfolio statistics |
+-- MAGIC | `get_revenue_by_territory` | Geographic revenue breakdown by territory |
+-- MAGIC | `get_platform_performance` | Streaming/radio platform analytics |
 
 -- COMMAND ----------
 
@@ -22,7 +26,7 @@
 
 -- COMMAND ----------
 
-USE CATALOG gmr_demo;
+USE CATALOG gmr_demo_catalog;
 USE SCHEMA royalties;
 
 -- COMMAND ----------
@@ -35,8 +39,8 @@ USE SCHEMA royalties;
 
 -- COMMAND ----------
 
-CREATE OR REPLACE FUNCTION gmr_demo.royalties.lookup_song_royalties(
-  search_term STRING COMMENT 'Song title or ISRC code to search for'
+CREATE OR REPLACE FUNCTION gmr_demo_catalog.royalties.lookup_song_royalties(
+  search_term STRING COMMENT 'Song ID (e.g. SONG000001), song title, or ISRC code to search for'
 )
 RETURNS TABLE (
   song_id STRING,
@@ -52,7 +56,7 @@ RETURNS TABLE (
   payment_status STRING,
   payment_date DATE
 )
-COMMENT 'Look up royalty payment history for a song by title or ISRC code. Returns all payments associated with the song including songwriter breakdown.'
+COMMENT 'Look up royalty payment history for a song by song_id, title, or ISRC code. Returns all payments associated with the song including songwriter breakdown.'
 RETURN
   SELECT
     s.song_id,
@@ -67,17 +71,18 @@ RETURN
     rp.net_amount,
     rp.payment_status,
     rp.payment_date
-  FROM gmr_demo.royalties.songs s
-  JOIN gmr_demo.royalties.royalty_payments rp ON s.song_id = rp.song_id
-  LEFT JOIN gmr_demo.royalties.songwriters sw ON rp.songwriter_id = sw.songwriter_id
-  WHERE LOWER(s.title) LIKE CONCAT('%', LOWER(search_term), '%')
+  FROM gmr_demo_catalog.royalties.songs s
+  JOIN gmr_demo_catalog.royalties.royalty_payments rp ON s.song_id = rp.song_id
+  LEFT JOIN gmr_demo_catalog.royalties.songwriters sw ON rp.songwriter_id = sw.songwriter_id
+  WHERE s.song_id = search_term
+     OR LOWER(s.title) LIKE CONCAT('%', LOWER(search_term), '%')
      OR UPPER(s.isrc_code) = UPPER(search_term)
   ORDER BY rp.payment_period DESC, rp.net_amount DESC;
 
 -- COMMAND ----------
 
 -- Test the function
-SELECT * FROM lookup_song_royalties('Midnight');
+SELECT * FROM lookup_song_royalties('Bohemian Rhapsody');
 
 -- COMMAND ----------
 
@@ -90,7 +95,7 @@ SELECT * FROM lookup_song_royalties('Midnight');
 -- COMMAND ----------
 
 -- Verify the search function exists
-DESCRIBE FUNCTION gmr_demo.royalties.search_song_catalog;
+DESCRIBE FUNCTION gmr_demo_catalog.royalties.search_song_catalog;
 
 -- COMMAND ----------
 
@@ -107,7 +112,7 @@ SELECT * FROM search_song_catalog('upbeat pop songs about summer');
 
 -- COMMAND ----------
 
-CREATE OR REPLACE FUNCTION gmr_demo.royalties.calculate_royalty_split(
+CREATE OR REPLACE FUNCTION gmr_demo_catalog.royalties.calculate_royalty_split(
   input_song_id STRING COMMENT 'The song_id to calculate splits for',
   gross_amount DOUBLE COMMENT 'The gross royalty amount to distribute'
 )
@@ -129,7 +134,7 @@ RETURN
       s.song_id,
       s.title,
       TRIM(writer_id) AS songwriter_id
-    FROM gmr_demo.royalties.songs s
+    FROM gmr_demo_catalog.royalties.songs s
     LATERAL VIEW EXPLODE(SPLIT(s.songwriters, ',')) AS writer_id
     WHERE s.song_id = input_song_id
   ),
@@ -142,7 +147,7 @@ RETURN
       wr.pro_affiliation,
       wr.split_percentage
     FROM song_writers sw
-    LEFT JOIN gmr_demo.royalties.songwriters wr ON sw.songwriter_id = wr.songwriter_id
+    LEFT JOIN gmr_demo_catalog.royalties.songwriters wr ON sw.songwriter_id = wr.songwriter_id
   ),
   normalized_splits AS (
     SELECT
@@ -177,7 +182,7 @@ SELECT * FROM calculate_royalty_split('SONG000001', 10000.00);
 
 -- COMMAND ----------
 
-CREATE OR REPLACE FUNCTION gmr_demo.royalties.get_licensing_summary(
+CREATE OR REPLACE FUNCTION gmr_demo_catalog.royalties.get_licensing_summary(
   search_term STRING COMMENT 'Song title, song_id, or artist name to search for'
 )
 RETURNS TABLE (
@@ -199,7 +204,7 @@ RETURN
              WHEN LOWER(title) LIKE CONCAT('%', LOWER(search_term), '%') THEN 'title'
              WHEN LOWER(artist_name) LIKE CONCAT('%', LOWER(search_term), '%') THEN 'artist'
            END AS match_type
-    FROM gmr_demo.royalties.songs
+    FROM gmr_demo_catalog.royalties.songs
     WHERE song_id = search_term
        OR LOWER(title) LIKE CONCAT('%', LOWER(search_term), '%')
        OR LOWER(artist_name) LIKE CONCAT('%', LOWER(search_term), '%')
@@ -213,7 +218,7 @@ RETURN
       l.fee_amount,
       CASE WHEN l.end_date >= CURRENT_DATE() THEN 1 ELSE 0 END AS is_active
     FROM matched_songs ms
-    JOIN gmr_demo.royalties.licenses l ON ms.song_id = l.song_id
+    JOIN gmr_demo_catalog.royalties.licenses l ON ms.song_id = l.song_id
   ),
   type_summary AS (
     SELECT
@@ -268,100 +273,351 @@ SELECT * FROM get_licensing_summary('SONG000001');
 
 -- COMMAND ----------
 
+-- COMMAND ----------
+
 -- MAGIC %md
--- MAGIC ## Tool 5: Flag Payment Anomaly
+-- MAGIC ## Tool 6: Lookup Songwriter Earnings
 -- MAGIC
--- MAGIC Detect unusual payments that deviate significantly from historical patterns.
--- MAGIC A payment is flagged if it's more than 2 standard deviations from the mean.
+-- MAGIC Get earnings summary for a specific songwriter by ID or name.
 
 -- COMMAND ----------
 
-CREATE OR REPLACE FUNCTION gmr_demo.royalties.flag_payment_anomaly(
-  input_song_id STRING COMMENT 'The song_id to check for anomalies',
-  input_licensee STRING COMMENT 'The licensee name to check (optional, use NULL for all)'
+CREATE OR REPLACE FUNCTION gmr_demo_catalog.royalties.lookup_songwriter_earnings(
+  search_term STRING COMMENT 'Songwriter ID (e.g. SW00001) or songwriter name to search for'
 )
 RETURNS TABLE (
-  song_id STRING,
-  title STRING,
-  licensee_name STRING,
-  payment_id STRING,
+  songwriter_id STRING,
+  songwriter_name STRING,
+  pro_affiliation STRING,
   payment_period STRING,
-  net_amount DOUBLE,
-  historical_mean DOUBLE,
-  historical_stddev DOUBLE,
-  z_score DOUBLE,
-  is_anomaly BOOLEAN,
-  anomaly_type STRING
+  total_gross DOUBLE,
+  total_deductions DOUBLE,
+  total_net DOUBLE,
+  num_payments INT,
+  num_songs INT
 )
-COMMENT 'Check if payments for a song/licensee combination show anomalies. Flags payments that deviate more than 2 standard deviations from historical average.'
+COMMENT 'Look up earnings for a songwriter by ID or name. Returns payment totals grouped by period.'
 RETURN
-  WITH song_info AS (
-    SELECT song_id, title FROM gmr_demo.royalties.songs WHERE song_id = input_song_id
-  ),
-  payment_history AS (
-    SELECT
-      rp.song_id,
-      l.licensee_name,
-      rp.payment_id,
-      rp.payment_period,
-      rp.net_amount
-    FROM gmr_demo.royalties.royalty_payments rp
-    JOIN gmr_demo.royalties.licenses l ON rp.song_id = l.song_id
-    WHERE rp.song_id = input_song_id
-      AND (input_licensee IS NULL OR l.licensee_name = input_licensee)
-  ),
-  stats AS (
-    SELECT
-      song_id,
-      licensee_name,
-      AVG(net_amount) AS historical_mean,
-      STDDEV(net_amount) AS historical_stddev
-    FROM payment_history
-    GROUP BY song_id, licensee_name
-  ),
-  anomaly_check AS (
-    SELECT
-      ph.song_id,
-      si.title,
-      ph.licensee_name,
-      ph.payment_id,
-      ph.payment_period,
-      ph.net_amount,
-      s.historical_mean,
-      s.historical_stddev,
-      CASE
-        WHEN s.historical_stddev > 0
-        THEN (ph.net_amount - s.historical_mean) / s.historical_stddev
-        ELSE 0
-      END AS z_score
-    FROM payment_history ph
-    JOIN song_info si ON ph.song_id = si.song_id
-    JOIN stats s ON ph.song_id = s.song_id AND ph.licensee_name = s.licensee_name
-  )
   SELECT
-    song_id,
-    title,
-    licensee_name,
-    payment_id,
-    payment_period,
-    ROUND(net_amount, 2) AS net_amount,
-    ROUND(historical_mean, 2) AS historical_mean,
-    ROUND(historical_stddev, 2) AS historical_stddev,
-    ROUND(z_score, 2) AS z_score,
-    ABS(z_score) > 2 AS is_anomaly,
-    CASE
-      WHEN z_score > 2 THEN 'UNUSUALLY_HIGH'
-      WHEN z_score < -2 THEN 'UNUSUALLY_LOW'
-      ELSE 'NORMAL'
-    END AS anomaly_type
-  FROM anomaly_check
-  ORDER BY ABS(z_score) DESC;
+    sw.songwriter_id,
+    sw.name AS songwriter_name,
+    sw.pro_affiliation,
+    rp.payment_period,
+    ROUND(SUM(rp.gross_amount), 2) AS total_gross,
+    ROUND(SUM(rp.deductions), 2) AS total_deductions,
+    ROUND(SUM(rp.net_amount), 2) AS total_net,
+    COUNT(*) AS num_payments,
+    COUNT(DISTINCT rp.song_id) AS num_songs
+  FROM gmr_demo_catalog.royalties.songwriters sw
+  JOIN gmr_demo_catalog.royalties.royalty_payments rp ON sw.songwriter_id = rp.songwriter_id
+  WHERE sw.songwriter_id = search_term
+     OR LOWER(sw.name) LIKE CONCAT('%', LOWER(search_term), '%')
+  GROUP BY sw.songwriter_id, sw.name, sw.pro_affiliation, rp.payment_period
+  ORDER BY rp.payment_period DESC, total_net DESC;
 
 -- COMMAND ----------
 
--- Test anomaly detection
-SELECT * FROM flag_payment_anomaly('SONG000001', NULL)
-WHERE is_anomaly = TRUE;
+-- Test songwriter earnings lookup
+SELECT * FROM lookup_songwriter_earnings('SW00001');
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## Tool 7: Get Top Royalty Songs
+-- MAGIC
+-- MAGIC Retrieve the highest-earning songs by total net royalty payments.
+-- MAGIC Supports filtering by genre, artist, or time period.
+
+-- COMMAND ----------
+
+CREATE OR REPLACE FUNCTION gmr_demo_catalog.royalties.get_top_royalty_songs(
+  num_results INT COMMENT 'Number of top songs to return (default 10, max 50)',
+  filter_genre STRING COMMENT 'Optional genre filter (e.g. Pop, Rock, Hip-Hop). Pass NULL or omit for all genres.',
+  filter_period STRING COMMENT 'Optional payment period filter (e.g. 2025-Q1). Pass NULL or omit for all periods.'
+)
+RETURNS TABLE (
+  rank INT,
+  song_id STRING,
+  title STRING,
+  artist_name STRING,
+  genre STRING,
+  total_gross DOUBLE,
+  total_deductions DOUBLE,
+  total_net DOUBLE,
+  num_payments INT,
+  num_songwriters INT
+)
+COMMENT 'Get the top royalty-earning songs ranked by total net payments. Use this when the user asks about top songs, highest-earning songs, best-performing songs, or royalty rankings. Optionally filter by genre or payment period.'
+RETURN
+  WITH ranked AS (
+    SELECT
+      ROW_NUMBER() OVER (ORDER BY SUM(rp.net_amount) DESC) AS rank,
+      s.song_id,
+      s.title,
+      s.artist_name,
+      s.genre,
+      ROUND(SUM(rp.gross_amount), 2) AS total_gross,
+      ROUND(SUM(rp.deductions), 2) AS total_deductions,
+      ROUND(SUM(rp.net_amount), 2) AS total_net,
+      COUNT(*) AS num_payments,
+      COUNT(DISTINCT rp.songwriter_id) AS num_songwriters
+    FROM gmr_demo_catalog.royalties.songs s
+    JOIN gmr_demo_catalog.royalties.royalty_payments rp ON s.song_id = rp.song_id
+    WHERE (filter_genre IS NULL OR UPPER(filter_genre) = 'NULL' OR LOWER(s.genre) = LOWER(filter_genre))
+      AND (filter_period IS NULL OR UPPER(filter_period) = 'NULL' OR rp.payment_period = filter_period)
+    GROUP BY s.song_id, s.title, s.artist_name, s.genre
+  )
+  SELECT * FROM ranked
+  WHERE rank <= COALESCE(num_results, 10);
+
+-- COMMAND ----------
+
+-- Test top royalty songs
+SELECT * FROM get_top_royalty_songs(5, NULL, NULL);
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## Tool 8: Get Catalog Overview
+-- MAGIC
+-- MAGIC Provide high-level portfolio statistics for the entire catalog or filtered by genre/artist.
+
+-- COMMAND ----------
+
+CREATE OR REPLACE FUNCTION gmr_demo_catalog.royalties.get_catalog_overview(
+  filter_genre STRING COMMENT 'Optional genre filter (e.g. Pop, Rock). Pass NULL or omit for entire catalog.'
+)
+RETURNS TABLE (
+  total_songs INT,
+  total_artists INT,
+  total_songwriters INT,
+  total_genres INT,
+  total_gross_revenue DOUBLE,
+  total_net_revenue DOUBLE,
+  total_licenses INT,
+  active_licenses INT,
+  avg_royalty_per_song DOUBLE,
+  top_genre STRING,
+  top_artist STRING
+)
+COMMENT 'Get high-level overview of the music catalog and royalty portfolio. Use this when the user asks about overall catalog stats, portfolio summary, how many songs/artists, total revenue, or general overview questions. Optionally filter by genre.'
+RETURN
+  WITH song_base AS (
+    SELECT * FROM gmr_demo_catalog.royalties.songs
+    WHERE (filter_genre IS NULL OR UPPER(filter_genre) = 'NULL' OR LOWER(genre) = LOWER(filter_genre))
+  ),
+  revenue AS (
+    SELECT
+      ROUND(SUM(rp.gross_amount), 2) AS total_gross_revenue,
+      ROUND(SUM(rp.net_amount), 2) AS total_net_revenue
+    FROM gmr_demo_catalog.royalties.royalty_payments rp
+    WHERE rp.song_id IN (SELECT song_id FROM song_base)
+  ),
+  license_stats AS (
+    SELECT
+      COUNT(*) AS total_licenses,
+      SUM(CASE WHEN end_date >= CURRENT_DATE() THEN 1 ELSE 0 END) AS active_licenses
+    FROM gmr_demo_catalog.royalties.licenses l
+    WHERE l.song_id IN (SELECT song_id FROM song_base)
+  ),
+  top_genre AS (
+    SELECT genre AS top_genre
+    FROM (
+      SELECT s.genre, SUM(rp.net_amount) AS rev
+      FROM song_base s
+      JOIN gmr_demo_catalog.royalties.royalty_payments rp ON s.song_id = rp.song_id
+      GROUP BY s.genre ORDER BY rev DESC LIMIT 1
+    )
+  ),
+  top_artist AS (
+    SELECT artist_name AS top_artist
+    FROM (
+      SELECT s.artist_name, SUM(rp.net_amount) AS rev
+      FROM song_base s
+      JOIN gmr_demo_catalog.royalties.royalty_payments rp ON s.song_id = rp.song_id
+      GROUP BY s.artist_name ORDER BY rev DESC LIMIT 1
+    )
+  )
+  SELECT
+    (SELECT COUNT(*) FROM song_base) AS total_songs,
+    (SELECT COUNT(DISTINCT artist_name) FROM song_base) AS total_artists,
+    (SELECT COUNT(DISTINCT songwriter_id) FROM gmr_demo_catalog.royalties.songwriters) AS total_songwriters,
+    (SELECT COUNT(DISTINCT genre) FROM song_base) AS total_genres,
+    r.total_gross_revenue,
+    r.total_net_revenue,
+    ls.total_licenses,
+    ls.active_licenses,
+    ROUND(r.total_net_revenue / NULLIF((SELECT COUNT(*) FROM song_base), 0), 2) AS avg_royalty_per_song,
+    tg.top_genre,
+    ta.top_artist
+  FROM revenue r
+  CROSS JOIN license_stats ls
+  CROSS JOIN top_genre tg
+  CROSS JOIN top_artist ta;
+
+-- COMMAND ----------
+
+-- Test catalog overview
+SELECT * FROM get_catalog_overview(NULL);
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## Tool 9: Get Revenue by Territory
+-- MAGIC
+-- MAGIC Analyze licensing revenue distribution across geographic territories.
+
+-- COMMAND ----------
+
+CREATE OR REPLACE FUNCTION gmr_demo_catalog.royalties.get_revenue_by_territory(
+  filter_territory STRING COMMENT 'Optional territory filter (e.g. US, UK, DE). Pass NULL or omit for all territories.'
+)
+RETURNS TABLE (
+  territory STRING,
+  total_licenses INT,
+  active_licenses INT,
+  total_revenue DOUBLE,
+  avg_fee_per_license DOUBLE,
+  top_license_type STRING,
+  top_licensee STRING,
+  num_songs INT
+)
+COMMENT 'Get licensing revenue breakdown by geographic territory. Use this when the user asks about revenue by country, territory performance, geographic distribution, international licensing, or market analysis. Optionally filter to a specific territory code (US, UK, DE, JP, etc.).'
+RETURN
+  WITH territory_base AS (
+    SELECT *
+    FROM gmr_demo_catalog.royalties.licenses
+    WHERE (filter_territory IS NULL OR UPPER(filter_territory) = 'NULL' OR UPPER(territory) = UPPER(filter_territory))
+  ),
+  territory_stats AS (
+    SELECT
+      territory,
+      COUNT(*) AS total_licenses,
+      SUM(CASE WHEN end_date >= CURRENT_DATE() THEN 1 ELSE 0 END) AS active_licenses,
+      ROUND(SUM(fee_amount), 2) AS total_revenue,
+      ROUND(AVG(fee_amount), 2) AS avg_fee_per_license,
+      COUNT(DISTINCT song_id) AS num_songs
+    FROM territory_base
+    GROUP BY territory
+  ),
+  top_types AS (
+    SELECT territory, license_type AS top_license_type
+    FROM (
+      SELECT territory, license_type, SUM(fee_amount) AS rev,
+             ROW_NUMBER() OVER (PARTITION BY territory ORDER BY SUM(fee_amount) DESC) AS rn
+      FROM territory_base
+      GROUP BY territory, license_type
+    ) WHERE rn = 1
+  ),
+  top_licensees AS (
+    SELECT territory, licensee_name AS top_licensee
+    FROM (
+      SELECT territory, licensee_name, SUM(fee_amount) AS rev,
+             ROW_NUMBER() OVER (PARTITION BY territory ORDER BY SUM(fee_amount) DESC) AS rn
+      FROM territory_base
+      GROUP BY territory, licensee_name
+    ) WHERE rn = 1
+  )
+  SELECT
+    ts.territory,
+    ts.total_licenses,
+    ts.active_licenses,
+    ts.total_revenue,
+    ts.avg_fee_per_license,
+    tt.top_license_type,
+    tl.top_licensee,
+    ts.num_songs
+  FROM territory_stats ts
+  LEFT JOIN top_types tt ON ts.territory = tt.territory
+  LEFT JOIN top_licensees tl ON ts.territory = tl.territory
+  ORDER BY ts.total_revenue DESC;
+
+-- COMMAND ----------
+
+-- Test territory revenue
+SELECT * FROM get_revenue_by_territory(NULL);
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## Tool 10: Get Platform Performance
+-- MAGIC
+-- MAGIC Analyze song performance across streaming platforms and radio stations.
+
+-- COMMAND ----------
+
+CREATE OR REPLACE FUNCTION gmr_demo_catalog.royalties.get_platform_performance(
+  search_term STRING COMMENT 'Song title, song_id, or artist name. Use NULL for all songs.',
+  filter_platform STRING COMMENT 'Optional platform filter (e.g. Spotify, Apple Music). Pass NULL or omit for all platforms.'
+)
+RETURNS TABLE (
+  platform STRING,
+  total_plays BIGINT,
+  total_play_hours DOUBLE,
+  num_songs INT,
+  num_territories INT,
+  avg_plays_per_song DOUBLE,
+  top_song_title STRING,
+  top_song_plays BIGINT
+)
+COMMENT 'Get performance analytics across streaming platforms and radio stations. Use this when the user asks about streaming numbers, play counts, platform performance, which platform has the most plays, Spotify vs Apple Music, or radio airplay. Optionally filter by song/artist and platform.'
+RETURN
+  WITH filtered_songs AS (
+    SELECT song_id, title, artist_name
+    FROM gmr_demo_catalog.royalties.songs
+    WHERE search_term IS NULL OR UPPER(search_term) = 'NULL'
+       OR song_id = search_term
+       OR LOWER(title) LIKE CONCAT('%', LOWER(search_term), '%')
+       OR LOWER(artist_name) LIKE CONCAT('%', LOWER(search_term), '%')
+  ),
+  play_data AS (
+    SELECT
+      pl.platform,
+      pl.song_id,
+      fs.title,
+      pl.territory,
+      pl.duration_played
+    FROM gmr_demo_catalog.royalties.performance_logs pl
+    JOIN filtered_songs fs ON pl.song_id = fs.song_id
+    WHERE (filter_platform IS NULL OR UPPER(filter_platform) = 'NULL' OR LOWER(pl.platform) = LOWER(filter_platform))
+  ),
+  platform_stats AS (
+    SELECT
+      platform,
+      COUNT(*) AS total_plays,
+      ROUND(SUM(duration_played) / 3600.0, 1) AS total_play_hours,
+      COUNT(DISTINCT song_id) AS num_songs,
+      COUNT(DISTINCT territory) AS num_territories,
+      ROUND(COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT song_id), 0), 1) AS avg_plays_per_song
+    FROM play_data
+    GROUP BY platform
+  ),
+  top_songs AS (
+    SELECT platform, title AS top_song_title, cnt AS top_song_plays
+    FROM (
+      SELECT platform, title, COUNT(*) AS cnt,
+             ROW_NUMBER() OVER (PARTITION BY platform ORDER BY COUNT(*) DESC) AS rn
+      FROM play_data
+      GROUP BY platform, title
+    ) WHERE rn = 1
+  )
+  SELECT
+    ps.platform,
+    ps.total_plays,
+    ps.total_play_hours,
+    ps.num_songs,
+    ps.num_territories,
+    ps.avg_plays_per_song,
+    ts.top_song_title,
+    ts.top_song_plays
+  FROM platform_stats ps
+  LEFT JOIN top_songs ts ON ps.platform = ts.platform
+  ORDER BY ps.total_plays DESC;
+
+-- COMMAND ----------
+
+-- Test platform performance
+SELECT * FROM get_platform_performance(NULL, NULL);
 
 -- COMMAND ----------
 
@@ -371,7 +627,7 @@ WHERE is_anomaly = TRUE;
 -- COMMAND ----------
 
 -- List all functions in the schema
-SHOW FUNCTIONS IN gmr_demo.royalties LIKE '*';
+SHOW FUNCTIONS IN gmr_demo_catalog.royalties LIKE '*';
 
 -- COMMAND ----------
 
@@ -386,20 +642,28 @@ SHOW FUNCTIONS IN gmr_demo.royalties LIKE '*';
 -- MAGIC | `search_song_catalog` | When user wants to find songs by description, genre, mood, or semantic similarity |
 -- MAGIC | `calculate_royalty_split` | When user wants to know how a payment should be divided among songwriters |
 -- MAGIC | `get_licensing_summary` | When user asks about licensing deals, territories, or license revenue |
--- MAGIC | `flag_payment_anomaly` | When user wants to check for unusual payments or potential issues with a licensee |
+-- MAGIC | `lookup_songwriter_earnings` | When user asks about a songwriter's earnings, payments, or income by songwriter ID or name |
+-- MAGIC | `get_top_royalty_songs` | When user asks about top songs, highest earners, best performers, or royalty rankings |
+-- MAGIC | `get_catalog_overview` | When user asks about overall portfolio stats, total revenue, how many songs/artists |
+-- MAGIC | `get_revenue_by_territory` | When user asks about revenue by country, geographic distribution, territory performance |
+-- MAGIC | `get_platform_performance` | When user asks about streaming numbers, play counts, platform comparisons |
 
 -- COMMAND ----------
 
 -- MAGIC %md
 -- MAGIC ## Summary
 -- MAGIC
--- MAGIC This notebook created 5 Unity Catalog functions that will serve as tools for our Mosaic AI agent:
+-- MAGIC This notebook created 9 Unity Catalog functions that will serve as tools for our Mosaic AI agent:
 -- MAGIC
--- MAGIC 1. **`lookup_song_royalties`** - Query royalty payment history by song title or ISRC
+-- MAGIC 1. **`lookup_song_royalties`** - Query royalty payment history by song_id, title, or ISRC
 -- MAGIC 2. **`search_song_catalog`** - Semantic search using Vector Search index
 -- MAGIC 3. **`calculate_royalty_split`** - Compute songwriter payment breakdown
 -- MAGIC 4. **`get_licensing_summary`** - Aggregate licensing statistics
--- MAGIC 5. **`flag_payment_anomaly`** - Statistical anomaly detection for payments
+-- MAGIC 5. **`lookup_songwriter_earnings`** - Query songwriter earnings by ID or name
+-- MAGIC 6. **`get_top_royalty_songs`** - Ranked list of highest-earning songs
+-- MAGIC 7. **`get_catalog_overview`** - High-level portfolio statistics
+-- MAGIC 8. **`get_revenue_by_territory`** - Geographic revenue breakdown
+-- MAGIC 9. **`get_platform_performance`** - Streaming/radio performance analytics
 -- MAGIC
 -- MAGIC All functions are registered in Unity Catalog and can be called directly in SQL or
 -- MAGIC programmatically via the Unity Catalog Functions API.

@@ -15,7 +15,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install mlflow>=2.14 databricks-sdk --quiet
+# MAGIC %pip install mlflow>=2.14 databricks-sdk databricks-agents --quiet
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -25,7 +25,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "gmr_demo", "Catalog Name")
+dbutils.widgets.text("catalog", "gmr_demo_catalog", "Catalog Name")
 dbutils.widgets.text("schema", "royalties", "Schema Name")
 
 CATALOG = dbutils.widgets.get("catalog")
@@ -43,7 +43,7 @@ print(f"Endpoint: {ENDPOINT_NAME}")
 import mlflow
 from mlflow import MlflowClient
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedEntityInput
+from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedEntityInput, AutoCaptureConfigInput
 import json
 import time
 
@@ -104,53 +104,42 @@ print(f"Set version {latest_version} as Champion")
 
 # COMMAND ----------
 
-# Check if endpoint exists
-existing_endpoints = [e.name for e in w.serving_endpoints.list()]
+# Deploy using the Databricks Agents SDK
+# This automatically configures the endpoint for AI Playground compatibility
+from databricks import agents
 
-if ENDPOINT_NAME in existing_endpoints:
-    print(f"Endpoint '{ENDPOINT_NAME}' already exists. Updating...")
-    endpoint_exists = True
-else:
-    print(f"Creating new endpoint: {ENDPOINT_NAME}")
-    endpoint_exists = False
-
-# COMMAND ----------
-
-# Define endpoint configuration
-endpoint_config = EndpointCoreConfigInput(
-    served_entities=[
-        ServedEntityInput(
-            entity_name=MODEL_NAME,
-            entity_version=str(latest_version),
-            workload_size="Small",  # Small, Medium, Large
-            scale_to_zero_enabled=True,  # Scale down when not in use
-            workload_type="CPU"  # or "GPU" for GPU-accelerated inference
-        )
-    ],
-    auto_capture_config={
-        "catalog_name": CATALOG,
-        "schema_name": SCHEMA,
-        "table_name_prefix": "agent_inference",
-        "enabled": True
-    }
-)
+# Get a SQL warehouse ID for tool execution
+warehouses = [wh for wh in w.warehouses.list()]
+warehouse_id = warehouses[0].id if warehouses else ""
+print(f"Using warehouse ID: {warehouse_id}")
 
 # COMMAND ----------
 
-# Create or update endpoint
-if endpoint_exists:
-    w.serving_endpoints.update_config(
-        name=ENDPOINT_NAME,
-        served_entities=endpoint_config.served_entities,
-        auto_capture_config=endpoint_config.auto_capture_config
+# Deploy the agent (creates/updates endpoint + Review App + Playground support)
+# Handle case where endpoint already serves the same version (idempotent)
+try:
+    deployment = agents.deploy(
+        model_name=MODEL_NAME,
+        model_version=latest_version,
+        scale_to_zero_enabled=True,
+        environment_vars={
+            "DATABRICKS_WAREHOUSE_ID": warehouse_id
+        }
     )
-else:
-    w.serving_endpoints.create(
-        name=ENDPOINT_NAME,
-        config=endpoint_config
-    )
+    DEPLOYED_ENDPOINT_NAME = deployment.endpoint_name
+    endpoint_url = deployment.query_endpoint
+    print(f"Deployment submitted!")
+except ValueError as e:
+    if "already serves" in str(e):
+        # Endpoint already deployed with this version - that's OK
+        DEPLOYED_ENDPOINT_NAME = f"agents_{MODEL_NAME.replace('.', '-')}"
+        endpoint_url = f"https://{w.config.host}/serving-endpoints/{DEPLOYED_ENDPOINT_NAME}/invocations"
+        print(f"Endpoint already deployed with version {latest_version} - reusing existing deployment")
+    else:
+        raise
 
-print(f"Endpoint configuration submitted: {ENDPOINT_NAME}")
+print(f"Endpoint name: {DEPLOYED_ENDPOINT_NAME}")
+print(f"Query endpoint: {endpoint_url}")
 
 # COMMAND ----------
 
@@ -159,27 +148,26 @@ print(f"Endpoint configuration submitted: {ENDPOINT_NAME}")
 
 # COMMAND ----------
 
-def wait_for_endpoint(endpoint_name, timeout=1200):
+def wait_for_endpoint(endpoint_name, timeout=2400):
     """Wait for serving endpoint to be ready."""
     start_time = time.time()
     while time.time() - start_time < timeout:
         endpoint = w.serving_endpoints.get(endpoint_name)
-        state = endpoint.state.ready
+        # Handle both string and enum state values
+        state = str(endpoint.state.ready)
+        config_update = str(endpoint.state.config_update) if endpoint.state.config_update else "NONE"
 
-        if state == "READY":
+        if "READY" in state and ("NOT_UPDATING" in config_update or "NONE" in config_update):
             print(f"Endpoint '{endpoint_name}' is READY!")
             return endpoint
-        elif state == "NOT_READY":
-            config_state = endpoint.state.config_update
-            print(f"Endpoint state: {state}, Config update: {config_state}")
-            time.sleep(30)
         else:
-            print(f"Unexpected state: {state}")
+            elapsed = int(time.time() - start_time)
+            print(f"[{elapsed}s] Endpoint state: {state}, Config update: {config_update}")
             time.sleep(30)
 
     raise TimeoutError(f"Endpoint did not become ready within {timeout} seconds")
 
-endpoint = wait_for_endpoint(ENDPOINT_NAME)
+endpoint = wait_for_endpoint(DEPLOYED_ENDPOINT_NAME)
 
 # COMMAND ----------
 
@@ -219,8 +207,7 @@ print("\nApply these via the Model Serving UI or REST API.")
 
 # COMMAND ----------
 
-# Get endpoint URL
-endpoint_url = f"https://{w.config.host}/serving-endpoints/{ENDPOINT_NAME}/invocations"
+# Print endpoint URL
 print(f"Endpoint URL: {endpoint_url}")
 
 # COMMAND ----------
@@ -259,9 +246,14 @@ print("Testing deployed agent...")
 print("-" * 50)
 
 test_questions = [
-    "What are the royalties for SONG000001?",
+    "What are the royalties for Bohemian Rhapsody?",
     "Find upbeat pop songs in our catalog",
-    "Are there any payment anomalies to investigate?"
+    "What are the top 5 highest-earning songs?",
+    "How should a $10,000 royalty be split for SONG000001?",
+    "What's the licensing summary for Blinding Lights?",
+    "Give me an overview of our music catalog",
+    "Which territories generate the most licensing revenue?",
+    "Which streaming platform has the most plays?",
 ]
 
 for q in test_questions:
@@ -310,7 +302,7 @@ w = WorkspaceClient()
 # Query the agent
 def query_gmr_agent(question: str) -> dict:
     """Query the GMR Royalty Assistant."""
-    endpoint_url = "https://{w.config.host}/serving-endpoints/{ENDPOINT_NAME}/invocations"
+    endpoint_url = "https://{w.config.host}/serving-endpoints/{DEPLOYED_ENDPOINT_NAME}/invocations"
 
     response = requests.post(
         endpoint_url,
@@ -325,7 +317,7 @@ def query_gmr_agent(question: str) -> dict:
     return response.json()
 
 # Example usage
-result = query_gmr_agent("What were the total royalties for Midnight Dreams in Q3 2025?")
+result = query_gmr_agent("What are the royalties for Bohemian Rhapsody?")
 print(result["response"])
 '''
 
@@ -347,7 +339,7 @@ print(python_sdk_example)
 # This is typically done via the UI, but here's the API approach:
 
 review_app_config = {
-    "endpoint_name": ENDPOINT_NAME,
+    "endpoint_name": DEPLOYED_ENDPOINT_NAME,
     "review_app_enabled": True,
     "feedback_config": {
         "thumbs_up_down": True,
@@ -358,7 +350,7 @@ review_app_config = {
 
 print("Review App Configuration:")
 print(json.dumps(review_app_config, indent=2))
-print(f"\nReview App URL: https://{w.config.host}/ml/review-app/{ENDPOINT_NAME}")
+print(f"\nReview App URL: https://{w.config.host}/ml/review-app/{DEPLOYED_ENDPOINT_NAME}")
 
 # COMMAND ----------
 
@@ -410,7 +402,7 @@ print("\nThis sends 90% of traffic to Champion, 10% to Challenger for A/B testin
 # COMMAND ----------
 
 # Get endpoint details
-endpoint_details = w.serving_endpoints.get(ENDPOINT_NAME)
+endpoint_details = w.serving_endpoints.get(DEPLOYED_ENDPOINT_NAME)
 
 print(f"Endpoint: {endpoint_details.name}")
 print(f"State: {endpoint_details.state.ready}")
@@ -450,7 +442,7 @@ if endpoint_details.config:
 print(f"""
 Agent Deployment Complete!
 ==========================
-Endpoint: {ENDPOINT_NAME}
+Endpoint: {DEPLOYED_ENDPOINT_NAME}
 Model: {MODEL_NAME}
 Version: {latest_version} (Champion)
 Status: {endpoint_details.state.ready}
@@ -459,5 +451,5 @@ Endpoint URL:
 {endpoint_url}
 
 Review App:
-https://{w.config.host}/ml/review-app/{ENDPOINT_NAME}
+https://{w.config.host}/ml/review-app/{DEPLOYED_ENDPOINT_NAME}
 """)

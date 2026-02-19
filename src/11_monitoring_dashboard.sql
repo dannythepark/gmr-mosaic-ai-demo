@@ -5,26 +5,50 @@
 -- MAGIC **Business Context:** This notebook provides SQL queries for monitoring the GMR Royalty Assistant
 -- MAGIC in production. These queries can be used to create a Lakeview dashboard for real-time monitoring.
 -- MAGIC
+-- MAGIC ## Data Sources
+-- MAGIC | Table | Purpose |
+-- MAGIC |-------|---------|
+-- MAGIC | `system.serving.endpoint_usage` | Request volume, tokens, status codes |
+-- MAGIC | `system.serving.served_entities` | Endpoint/entity metadata (dimension table) |
+-- MAGIC | `gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload` | Request/response content, latency |
+-- MAGIC
 -- MAGIC ## Dashboard Sections
 -- MAGIC 1. Request Volume & Trends
 -- MAGIC 2. Latency Metrics (P50, P95, P99)
 -- MAGIC 3. Error Rates & Types
--- MAGIC 4. Token Usage & Costs
+-- MAGIC 4. Token Usage & Cost Estimation
 -- MAGIC 5. Guardrail Trigger Analysis
 -- MAGIC 6. User Activity Patterns
+-- MAGIC 7. Agent Tool Usage
 
 -- COMMAND ----------
 
 -- MAGIC %md
 -- MAGIC ## Configuration
--- MAGIC
--- MAGIC Adjust these variables for your deployment:
 
 -- COMMAND ----------
 
--- Set catalog and schema
-USE CATALOG gmr_demo;
+USE CATALOG gmr_demo_catalog;
 USE SCHEMA royalties;
+
+-- COMMAND ----------
+
+-- MAGIC %md
+-- MAGIC ## Identify GMR Agent Served Entities
+
+-- COMMAND ----------
+
+-- List served entities for our GMR agent endpoint
+SELECT
+  served_entity_id,
+  endpoint_name,
+  entity_name,
+  entity_version,
+  entity_type,
+  change_time
+FROM system.serving.served_entities
+WHERE endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+ORDER BY change_time DESC;
 
 -- COMMAND ----------
 
@@ -34,33 +58,32 @@ USE SCHEMA royalties;
 -- COMMAND ----------
 
 -- Daily request volume (last 30 days)
--- NOTE: Replace with actual inference table names after deployment
-
-CREATE OR REPLACE TEMPORARY VIEW daily_volume AS
 SELECT
-  DATE(timestamp) AS date,
+  DATE(u.request_time) AS date,
   COUNT(*) AS total_requests,
-  COUNT(DISTINCT client_request_id) AS unique_sessions,
-  ROUND(AVG(total_tokens), 0) AS avg_tokens_per_request
-FROM system.serving.served_model_inference_logs  -- Replace with your inference table
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 30 DAYS
+  COUNT(DISTINCT u.client_request_id) AS unique_sessions,
+  COUNT(DISTINCT u.requester) AS unique_users,
+  SUM(CASE WHEN u.status_code = 200 THEN 1 ELSE 0 END) AS successful_requests
+FROM system.serving.endpoint_usage u
+JOIN system.serving.served_entities e
+  ON u.served_entity_id = e.served_entity_id
+WHERE e.endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+  AND u.request_time >= CURRENT_DATE() - INTERVAL 30 DAYS
 GROUP BY 1
 ORDER BY 1;
 
--- Display results
-SELECT * FROM daily_volume;
-
 -- COMMAND ----------
 
--- Hourly request pattern (typical day)
+-- Hourly request pattern (typical week)
 SELECT
-  HOUR(timestamp) AS hour_of_day,
-  DAYOFWEEK(timestamp) AS day_of_week,
+  HOUR(u.request_time) AS hour_of_day,
+  DAYOFWEEK(u.request_time) AS day_of_week,
   COUNT(*) AS request_count
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 7 DAYS
+FROM system.serving.endpoint_usage u
+JOIN system.serving.served_entities e
+  ON u.served_entity_id = e.served_entity_id
+WHERE e.endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+  AND u.request_time >= CURRENT_DATE() - INTERVAL 7 DAYS
 GROUP BY 1, 2
 ORDER BY 2, 1;
 
@@ -68,21 +91,22 @@ ORDER BY 2, 1;
 
 -- MAGIC %md
 -- MAGIC ## 2. Latency Metrics
+-- MAGIC
+-- MAGIC Latency data comes from the inference payload table.
 
 -- COMMAND ----------
 
 -- Latency percentiles by day
 SELECT
-  DATE(timestamp) AS date,
+  DATE(TIMESTAMP_MILLIS(timestamp_ms)) AS date,
   COUNT(*) AS requests,
   ROUND(PERCENTILE(execution_time_ms, 0.50), 0) AS p50_latency_ms,
   ROUND(PERCENTILE(execution_time_ms, 0.90), 0) AS p90_latency_ms,
   ROUND(PERCENTILE(execution_time_ms, 0.95), 0) AS p95_latency_ms,
   ROUND(PERCENTILE(execution_time_ms, 0.99), 0) AS p99_latency_ms,
   ROUND(MAX(execution_time_ms), 0) AS max_latency_ms
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 14 DAYS
+FROM gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload
+WHERE timestamp_ms >= UNIX_MILLIS(CURRENT_TIMESTAMP() - INTERVAL 14 DAYS)
 GROUP BY 1
 ORDER BY 1;
 
@@ -99,9 +123,8 @@ SELECT
   END AS latency_bucket,
   COUNT(*) AS request_count,
   ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS percentage
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 7 DAYS
+FROM gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload
+WHERE timestamp_ms >= UNIX_MILLIS(CURRENT_TIMESTAMP() - INTERVAL 7 DAYS)
 GROUP BY 1
 ORDER BY
   CASE latency_bucket
@@ -121,13 +144,15 @@ ORDER BY
 
 -- Error rates by day
 SELECT
-  DATE(timestamp) AS date,
+  DATE(u.request_time) AS date,
   COUNT(*) AS total_requests,
-  SUM(CASE WHEN status_code != 200 THEN 1 ELSE 0 END) AS error_count,
-  ROUND(100.0 * SUM(CASE WHEN status_code != 200 THEN 1 ELSE 0 END) / COUNT(*), 2) AS error_rate_pct
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 14 DAYS
+  SUM(CASE WHEN u.status_code != 200 THEN 1 ELSE 0 END) AS error_count,
+  ROUND(100.0 * SUM(CASE WHEN u.status_code != 200 THEN 1 ELSE 0 END) / COUNT(*), 2) AS error_rate_pct
+FROM system.serving.endpoint_usage u
+JOIN system.serving.served_entities e
+  ON u.served_entity_id = e.served_entity_id
+WHERE e.endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+  AND u.request_time >= CURRENT_DATE() - INTERVAL 14 DAYS
 GROUP BY 1
 ORDER BY 1;
 
@@ -135,13 +160,15 @@ ORDER BY 1;
 
 -- Error breakdown by status code
 SELECT
-  status_code,
+  u.status_code,
   COUNT(*) AS error_count,
   ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS percentage
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND status_code != 200
-  AND timestamp >= CURRENT_DATE() - INTERVAL 7 DAYS
+FROM system.serving.endpoint_usage u
+JOIN system.serving.served_entities e
+  ON u.served_entity_id = e.served_entity_id
+WHERE e.endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+  AND u.status_code != 200
+  AND u.request_time >= CURRENT_DATE() - INTERVAL 7 DAYS
 GROUP BY 1
 ORDER BY 2 DESC;
 
@@ -154,39 +181,43 @@ ORDER BY 2 DESC;
 
 -- Daily token usage
 SELECT
-  DATE(timestamp) AS date,
-  SUM(prompt_tokens) AS total_prompt_tokens,
-  SUM(completion_tokens) AS total_completion_tokens,
-  SUM(total_tokens) AS total_tokens,
-  ROUND(AVG(total_tokens), 0) AS avg_tokens_per_request,
-  -- Estimated cost (adjust rates based on your model)
-  ROUND(SUM(prompt_tokens) * 0.00001 + SUM(completion_tokens) * 0.00003, 2) AS estimated_cost_usd
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 30 DAYS
+  DATE(u.request_time) AS date,
+  SUM(u.input_token_count) AS total_input_tokens,
+  SUM(u.output_token_count) AS total_output_tokens,
+  SUM(u.input_token_count + u.output_token_count) AS total_tokens,
+  ROUND(AVG(u.input_token_count + u.output_token_count), 0) AS avg_tokens_per_request,
+  -- Estimated cost (Claude Sonnet 4.5 rates: $3/MTok input, $15/MTok output)
+  ROUND(SUM(u.input_token_count) * 0.000003 + SUM(u.output_token_count) * 0.000015, 4) AS estimated_cost_usd
+FROM system.serving.endpoint_usage u
+JOIN system.serving.served_entities e
+  ON u.served_entity_id = e.served_entity_id
+WHERE e.endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+  AND u.request_time >= CURRENT_DATE() - INTERVAL 30 DAYS
 GROUP BY 1
 ORDER BY 1;
 
 -- COMMAND ----------
 
--- Token usage by request type (based on input pattern)
+-- Token usage by request type (from payload table)
 SELECT
   CASE
-    WHEN request LIKE '%royalt%' THEN 'Royalty Lookup'
-    WHEN request LIKE '%search%' OR request LIKE '%find%' THEN 'Song Search'
-    WHEN request LIKE '%split%' THEN 'Royalty Split'
-    WHEN request LIKE '%licens%' THEN 'Licensing'
-    WHEN request LIKE '%anomal%' THEN 'Anomaly Detection'
+    WHEN LOWER(request) LIKE '%royalt%' AND LOWER(request) NOT LIKE '%split%' THEN 'Royalty Lookup'
+    WHEN LOWER(request) LIKE '%search%' OR LOWER(request) LIKE '%find%' THEN 'Song Search'
+    WHEN LOWER(request) LIKE '%split%' THEN 'Royalty Split'
+    WHEN LOWER(request) LIKE '%licens%' THEN 'Licensing'
+    WHEN LOWER(request) LIKE '%overview%' OR LOWER(request) LIKE '%catalog%' THEN 'Catalog Overview'
+    WHEN LOWER(request) LIKE '%territory%' THEN 'Territory Revenue'
+    WHEN LOWER(request) LIKE '%platform%' OR LOWER(request) LIKE '%streaming%' THEN 'Platform Performance'
+    WHEN LOWER(request) LIKE '%earn%' OR LOWER(request) LIKE '%songwriter%' THEN 'Songwriter Earnings'
+    WHEN LOWER(request) LIKE '%top%' AND LOWER(request) LIKE '%song%' THEN 'Top Songs'
     ELSE 'Other'
   END AS query_type,
   COUNT(*) AS request_count,
-  ROUND(AVG(total_tokens), 0) AS avg_tokens,
-  SUM(total_tokens) AS total_tokens
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 7 DAYS
+  ROUND(AVG(execution_time_ms), 0) AS avg_latency_ms
+FROM gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload
+WHERE timestamp_ms >= UNIX_MILLIS(CURRENT_TIMESTAMP() - INTERVAL 7 DAYS)
 GROUP BY 1
-ORDER BY 4 DESC;
+ORDER BY 2 DESC;
 
 -- COMMAND ----------
 
@@ -195,28 +226,12 @@ ORDER BY 4 DESC;
 
 -- COMMAND ----------
 
--- Guardrail triggers by type (simulated - replace with actual guardrail logs)
--- This query assumes guardrail events are logged to a separate table
-
-/*
+-- Estimated guardrail triggers based on request content (from payload table)
 SELECT
-  DATE(timestamp) AS date,
-  guardrail_type,
-  trigger_reason,
-  COUNT(*) AS trigger_count
-FROM gmr_demo.royalties.agent_guardrail_events
-WHERE timestamp >= CURRENT_DATE() - INTERVAL 14 DAYS
-GROUP BY 1, 2, 3
-ORDER BY 1, 4 DESC;
-*/
-
--- Simulated guardrail analysis based on request patterns
-SELECT
-  'PII_BLOCKED' AS guardrail_type,
+  'PII_REQUEST' AS guardrail_type,
   COUNT(*) AS estimated_triggers
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 7 DAYS
+FROM gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload
+WHERE timestamp_ms >= UNIX_MILLIS(CURRENT_TIMESTAMP() - INTERVAL 7 DAYS)
   AND (
     LOWER(request) LIKE '%email%'
     OR LOWER(request) LIKE '%ipi%'
@@ -226,11 +241,10 @@ WHERE served_model_name LIKE '%gmr%'
 UNION ALL
 
 SELECT
-  'OFF_TOPIC_BLOCKED' AS guardrail_type,
+  'OFF_TOPIC_REQUEST' AS guardrail_type,
   COUNT(*) AS estimated_triggers
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 7 DAYS
+FROM gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload
+WHERE timestamp_ms >= UNIX_MILLIS(CURRENT_TIMESTAMP() - INTERVAL 7 DAYS)
   AND (
     LOWER(request) LIKE '%weather%'
     OR LOWER(request) LIKE '%poem%'
@@ -246,14 +260,17 @@ WHERE served_model_name LIKE '%gmr%'
 
 -- Top users by request volume
 SELECT
-  requester AS user_id,
+  u.requester AS user_id,
   COUNT(*) AS request_count,
-  COUNT(DISTINCT DATE(timestamp)) AS active_days,
-  MIN(timestamp) AS first_request,
-  MAX(timestamp) AS last_request
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 30 DAYS
+  COUNT(DISTINCT DATE(u.request_time)) AS active_days,
+  MIN(u.request_time) AS first_request,
+  MAX(u.request_time) AS last_request,
+  SUM(u.input_token_count + u.output_token_count) AS total_tokens
+FROM system.serving.endpoint_usage u
+JOIN system.serving.served_entities e
+  ON u.served_entity_id = e.served_entity_id
+WHERE e.endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+  AND u.request_time >= CURRENT_DATE() - INTERVAL 30 DAYS
 GROUP BY 1
 ORDER BY 2 DESC
 LIMIT 20;
@@ -262,13 +279,15 @@ LIMIT 20;
 
 -- User engagement over time
 SELECT
-  DATE(timestamp) AS date,
-  COUNT(DISTINCT requester) AS unique_users,
+  DATE(u.request_time) AS date,
+  COUNT(DISTINCT u.requester) AS unique_users,
   COUNT(*) AS total_requests,
-  ROUND(COUNT(*) * 1.0 / COUNT(DISTINCT requester), 1) AS requests_per_user
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 30 DAYS
+  ROUND(COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT u.requester), 0), 1) AS requests_per_user
+FROM system.serving.endpoint_usage u
+JOIN system.serving.served_entities e
+  ON u.served_entity_id = e.served_entity_id
+WHERE e.endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+  AND u.request_time >= CURRENT_DATE() - INTERVAL 30 DAYS
 GROUP BY 1
 ORDER BY 1;
 
@@ -279,22 +298,24 @@ ORDER BY 1;
 
 -- COMMAND ----------
 
--- Tool invocation patterns (based on request analysis)
+-- Tool invocation patterns (from payload table request content)
 SELECT
   CASE
     WHEN LOWER(request) LIKE '%royalt%' AND LOWER(request) NOT LIKE '%split%' THEN 'lookup_song_royalties'
     WHEN LOWER(request) LIKE '%search%' OR LOWER(request) LIKE '%find%songs%' THEN 'search_song_catalog'
     WHEN LOWER(request) LIKE '%split%' THEN 'calculate_royalty_split'
     WHEN LOWER(request) LIKE '%licens%' THEN 'get_licensing_summary'
-    WHEN LOWER(request) LIKE '%anomal%' THEN 'flag_payment_anomaly'
+    WHEN LOWER(request) LIKE '%overview%' OR LOWER(request) LIKE '%catalog%' THEN 'get_catalog_overview'
+    WHEN LOWER(request) LIKE '%territory%' THEN 'get_revenue_by_territory'
+    WHEN LOWER(request) LIKE '%platform%' OR LOWER(request) LIKE '%streaming%' THEN 'get_platform_performance'
+    WHEN LOWER(request) LIKE '%earn%' OR LOWER(request) LIKE '%songwriter%' THEN 'lookup_songwriter_earnings'
+    WHEN LOWER(request) LIKE '%top%' AND LOWER(request) LIKE '%song%' THEN 'get_top_royalty_songs'
     ELSE 'unknown'
   END AS likely_tool,
   COUNT(*) AS invocation_count,
-  ROUND(AVG(execution_time_ms), 0) AS avg_latency_ms,
-  ROUND(AVG(total_tokens), 0) AS avg_tokens
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 7 DAYS
+  ROUND(AVG(execution_time_ms), 0) AS avg_latency_ms
+FROM gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload
+WHERE timestamp_ms >= UNIX_MILLIS(CURRENT_TIMESTAMP() - INTERVAL 7 DAYS)
 GROUP BY 1
 ORDER BY 2 DESC;
 
@@ -305,24 +326,37 @@ ORDER BY 2 DESC;
 
 -- COMMAND ----------
 
--- SLA metrics (assuming 2-second target latency)
+-- SLA metrics (2-second target latency, from payload table for latency + endpoint_usage for success rate)
 SELECT
-  DATE(timestamp) AS date,
+  DATE(u.request_time) AS date,
+  COUNT(*) AS total_requests,
+  SUM(CASE WHEN u.status_code = 200 THEN 1 ELSE 0 END) AS successful,
+  ROUND(100.0 * SUM(CASE WHEN u.status_code = 200 THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate_pct
+FROM system.serving.endpoint_usage u
+JOIN system.serving.served_entities e
+  ON u.served_entity_id = e.served_entity_id
+WHERE e.endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+  AND u.request_time >= CURRENT_DATE() - INTERVAL 14 DAYS
+GROUP BY 1
+ORDER BY 1;
+
+-- COMMAND ----------
+
+-- Latency SLA compliance (from payload table)
+SELECT
+  DATE(TIMESTAMP_MILLIS(timestamp_ms)) AS date,
   COUNT(*) AS total_requests,
   SUM(CASE WHEN execution_time_ms <= 2000 THEN 1 ELSE 0 END) AS within_sla,
-  ROUND(100.0 * SUM(CASE WHEN execution_time_ms <= 2000 THEN 1 ELSE 0 END) / COUNT(*), 2) AS sla_compliance_pct,
-  SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) AS successful,
-  ROUND(100.0 * SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate_pct
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 14 DAYS
+  ROUND(100.0 * SUM(CASE WHEN execution_time_ms <= 2000 THEN 1 ELSE 0 END) / COUNT(*), 2) AS sla_compliance_pct
+FROM gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload
+WHERE timestamp_ms >= UNIX_MILLIS(CURRENT_TIMESTAMP() - INTERVAL 14 DAYS)
 GROUP BY 1
 ORDER BY 1;
 
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## 9. Executive Summary View
+-- MAGIC ## 9. Executive Summary
 
 -- COMMAND ----------
 
@@ -330,15 +364,17 @@ ORDER BY 1;
 SELECT
   'Last 7 Days' AS period,
   COUNT(*) AS total_requests,
-  COUNT(DISTINCT requester) AS unique_users,
-  ROUND(AVG(execution_time_ms), 0) AS avg_latency_ms,
-  ROUND(PERCENTILE(execution_time_ms, 0.95), 0) AS p95_latency_ms,
-  ROUND(100.0 * SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate_pct,
-  SUM(total_tokens) AS total_tokens,
-  ROUND(SUM(prompt_tokens) * 0.00001 + SUM(completion_tokens) * 0.00003, 2) AS estimated_cost_usd
-FROM system.serving.served_model_inference_logs
-WHERE served_model_name LIKE '%gmr%'
-  AND timestamp >= CURRENT_DATE() - INTERVAL 7 DAYS;
+  COUNT(DISTINCT u.requester) AS unique_users,
+  ROUND(100.0 * SUM(CASE WHEN u.status_code = 200 THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate_pct,
+  SUM(u.input_token_count) AS total_input_tokens,
+  SUM(u.output_token_count) AS total_output_tokens,
+  SUM(u.input_token_count + u.output_token_count) AS total_tokens,
+  ROUND(SUM(u.input_token_count) * 0.000003 + SUM(u.output_token_count) * 0.000015, 4) AS estimated_cost_usd
+FROM system.serving.endpoint_usage u
+JOIN system.serving.served_entities e
+  ON u.served_entity_id = e.served_entity_id
+WHERE e.endpoint_name = 'agents_gmr_demo_catalog-royalties-gmr_royalty_agent'
+  AND u.request_time >= CURRENT_DATE() - INTERVAL 7 DAYS;
 
 -- COMMAND ----------
 
@@ -353,47 +389,32 @@ WHERE served_model_name LIKE '%gmr%'
 -- MAGIC
 -- MAGIC ### Recommended Dashboard Layout
 -- MAGIC
--- MAGIC | Section | Visualization Type | Query |
--- MAGIC |---------|-------------------|-------|
--- MAGIC | Header | Counter | Executive Summary |
--- MAGIC | Row 1 | Line Chart | Daily Request Volume |
--- MAGIC | Row 1 | Bar Chart | Latency Percentiles |
--- MAGIC | Row 2 | Line Chart | Error Rates |
--- MAGIC | Row 2 | Pie Chart | Tool Usage Distribution |
--- MAGIC | Row 3 | Heatmap | Hourly Request Pattern |
--- MAGIC | Row 3 | Bar Chart | Top Users |
--- MAGIC | Row 4 | Counter | Guardrail Triggers |
--- MAGIC | Row 4 | Line Chart | SLA Compliance |
+-- MAGIC | Section | Visualization Type | Data Source |
+-- MAGIC |---------|-------------------|------------|
+-- MAGIC | Header | Counter | Executive Summary (endpoint_usage) |
+-- MAGIC | Row 1 | Line Chart | Daily Request Volume (endpoint_usage) |
+-- MAGIC | Row 1 | Bar Chart | Latency Percentiles (payload table) |
+-- MAGIC | Row 2 | Line Chart | Error Rates (endpoint_usage) |
+-- MAGIC | Row 2 | Pie Chart | Tool Usage Distribution (payload table) |
+-- MAGIC | Row 3 | Heatmap | Hourly Request Pattern (endpoint_usage) |
+-- MAGIC | Row 3 | Bar Chart | Top Users (endpoint_usage) |
+-- MAGIC | Row 4 | Counter | Guardrail Triggers (payload table) |
+-- MAGIC | Row 4 | Line Chart | SLA Compliance (both tables) |
 
 -- COMMAND ----------
 
 -- MAGIC %md
 -- MAGIC ## Summary
 -- MAGIC
--- MAGIC This notebook provides SQL queries for comprehensive monitoring of the GMR Royalty Assistant:
+-- MAGIC This notebook provides monitoring queries using three data sources:
 -- MAGIC
--- MAGIC 1. **Request Metrics** - Volume, trends, patterns
--- MAGIC 2. **Performance** - Latency percentiles, SLA compliance
--- MAGIC 3. **Reliability** - Error rates, success rates
--- MAGIC 4. **Cost** - Token usage, estimated costs
--- MAGIC 5. **Safety** - Guardrail triggers
--- MAGIC 6. **Usage** - User activity, tool usage
+-- MAGIC | Source | Used For |
+-- MAGIC |--------|----------|
+-- MAGIC | `system.serving.endpoint_usage` | Volume, tokens, errors, users, cost |
+-- MAGIC | `system.serving.served_entities` | Endpoint metadata (join dimension) |
+-- MAGIC | `gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload` | Latency, request content, tool usage |
 -- MAGIC
 -- MAGIC ### Next Steps
--- MAGIC
 -- MAGIC 1. Create a Lakeview dashboard using these queries
--- MAGIC 2. Set up alerts for:
--- MAGIC    - Error rate > 5%
--- MAGIC    - P95 latency > 5 seconds
--- MAGIC    - Guardrail trigger spikes
+-- MAGIC 2. Set up alerts for error rate > 5%, P95 latency > 5s
 -- MAGIC 3. Schedule daily summary reports
--- MAGIC
--- MAGIC ---
--- MAGIC
--- MAGIC **Demo Complete!** You have now built an end-to-end Mosaic AI agent for GMR with:
--- MAGIC - Sample data generation
--- MAGIC - Feature engineering & vector search
--- MAGIC - Agent with UC function tools
--- MAGIC - LLM-as-judge evaluation
--- MAGIC - Production deployment with guardrails
--- MAGIC - Comprehensive monitoring

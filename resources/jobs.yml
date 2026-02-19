@@ -15,11 +15,7 @@ resources:
           notebook_task:
             notebook_path: ../src/01_data_generation.py
             source: WORKSPACE
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            num_workers: 2
-            node_type_id: "i3.xlarge"
-            data_security_mode: "SINGLE_USER"
+          environment_key: default
 
         - task_key: data_ingestion
           depends_on:
@@ -27,11 +23,7 @@ resources:
           notebook_task:
             notebook_path: ../src/02_data_ingestion.py
             source: WORKSPACE
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            num_workers: 2
-            node_type_id: "i3.xlarge"
-            data_security_mode: "SINGLE_USER"
+          environment_key: default
 
         - task_key: feature_engineering
           depends_on:
@@ -39,11 +31,7 @@ resources:
           notebook_task:
             notebook_path: ../src/03_feature_engineering.py
             source: WORKSPACE
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            num_workers: 2
-            node_type_id: "i3.xlarge"
-            data_security_mode: "SINGLE_USER"
+          environment_key: default
 
         - task_key: vector_index
           depends_on:
@@ -51,11 +39,12 @@ resources:
           notebook_task:
             notebook_path: ../src/04_vector_index.py
             source: WORKSPACE
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            num_workers: 1
-            node_type_id: "i3.xlarge"
-            data_security_mode: "SINGLE_USER"
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
 
     # Agent setup job - creates tools and builds agent
     gmr_agent_setup:
@@ -66,7 +55,7 @@ resources:
           notebook_task:
             notebook_path: ../src/06_agent_tools.sql
             source: WORKSPACE
-            warehouse_id: ${var.warehouse_id}
+          environment_key: default
 
         - task_key: build_agent
           depends_on:
@@ -74,11 +63,7 @@ resources:
           notebook_task:
             notebook_path: ../src/07_build_agent.py
             source: WORKSPACE
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            num_workers: 1
-            node_type_id: "i3.xlarge"
-            data_security_mode: "SINGLE_USER"
+          environment_key: default
 
         - task_key: evaluate_agent
           depends_on:
@@ -86,11 +71,7 @@ resources:
           notebook_task:
             notebook_path: ../src/08_evaluate_agent.py
             source: WORKSPACE
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            num_workers: 1
-            node_type_id: "i3.xlarge"
-            data_security_mode: "SINGLE_USER"
+          environment_key: default
 
         - task_key: deploy_agent
           depends_on:
@@ -98,11 +79,12 @@ resources:
           notebook_task:
             notebook_path: ../src/09_deploy_agent.py
             source: WORKSPACE
-          new_cluster:
-            spark_version: "15.4.x-scala2.12"
-            num_workers: 1
-            node_type_id: "i3.xlarge"
-            data_security_mode: "SINGLE_USER"
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"
 
     # AI Functions demo - standalone SQL notebook
     gmr_ai_functions_demo:
@@ -113,4 +95,9 @@ resources:
           notebook_task:
             notebook_path: ../src/05_ai_functions.sql
             source: WORKSPACE
-            warehouse_id: ${var.warehouse_id}
+          environment_key: default
+
+      environments:
+        - environment_key: default
+          spec:
+            client: "1"

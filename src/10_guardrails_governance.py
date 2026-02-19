@@ -27,7 +27,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "gmr_demo", "Catalog Name")
+dbutils.widgets.text("catalog", "gmr_demo_catalog", "Catalog Name")
 dbutils.widgets.text("schema", "royalties", "Schema Name")
 
 CATALOG = dbutils.widgets.get("catalog")
@@ -222,16 +222,16 @@ Service Principal Configuration for GMR Agent
 
 3. SQL Commands:
    -- Grant catalog access
-   GRANT USE CATALOG ON CATALOG gmr_demo TO `gmr-agent-service-principal`;
+   GRANT USE CATALOG ON CATALOG gmr_demo_catalog TO `gmr-agent-service-principal`;
 
    -- Grant schema access
-   GRANT USE SCHEMA ON SCHEMA gmr_demo.royalties TO `gmr-agent-service-principal`;
+   GRANT USE SCHEMA ON SCHEMA gmr_demo_catalog.royalties TO `gmr-agent-service-principal`;
 
    -- Grant table read access
-   GRANT SELECT ON SCHEMA gmr_demo.royalties TO `gmr-agent-service-principal`;
+   GRANT SELECT ON SCHEMA gmr_demo_catalog.royalties TO `gmr-agent-service-principal`;
 
    -- Grant function execute access
-   GRANT EXECUTE ON SCHEMA gmr_demo.royalties TO `gmr-agent-service-principal`;
+   GRANT EXECUTE ON SCHEMA gmr_demo_catalog.royalties TO `gmr-agent-service-principal`;
 
 4. Configure Endpoint:
    - Set run_as: gmr-agent-service-principal
@@ -293,7 +293,7 @@ print(secrets_config)
 
 # Check if inference tables are being populated
 inference_tables = spark.sql(f"""
-    SHOW TABLES IN {CATALOG}.{SCHEMA} LIKE 'agent_inference*'
+    SHOW TABLES IN {CATALOG}.{SCHEMA} LIKE '*payload*'
 """).collect()
 
 print("Inference Tables:")
@@ -316,7 +316,7 @@ for table in inference_tables:
 # MAGIC --   response,
 # MAGIC --   latency_ms,
 # MAGIC --   status_code
-# MAGIC -- FROM gmr_demo.royalties.agent_inference_request
+# MAGIC -- FROM gmr_demo_catalog.royalties.gmr_royalty_agent_1_payload
 # MAGIC -- ORDER BY timestamp DESC
 # MAGIC -- LIMIT 10;
 
@@ -495,7 +495,7 @@ Rate Limits:
 - Per Endpoint: 100 calls/minute, 1000 calls/hour
 
 Audit Logging:
-- Inference Tables: {CATALOG}.{SCHEMA}.agent_inference_*
+- Inference Tables: {CATALOG}.{SCHEMA}.gmr_royalty_agent_1_payload
 - Usage Tracking: Enabled
 
 Review the governance checklist above for compliance verification.

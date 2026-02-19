@@ -24,7 +24,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "gmr_demo", "Catalog Name")
+dbutils.widgets.text("catalog", "gmr_demo_catalog", "Catalog Name")
 dbutils.widgets.text("schema", "royalties", "Schema Name")
 
 CATALOG = dbutils.widgets.get("catalog")
@@ -139,71 +139,29 @@ display(song_metadata_df.limit(5))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Generate Embeddings
+# MAGIC ## Save Source Table for Vector Search
 # MAGIC
-# MAGIC Use the Foundation Model endpoint `databricks-gte-large-en` to generate
-# MAGIC 1024-dimensional embeddings for each song's metadata text.
+# MAGIC With computed embeddings mode, we don't need to generate embeddings manually.
+# MAGIC The Vector Search index will automatically use the Foundation Model endpoint
+# MAGIC `databricks-gte-large-en` to embed the `metadata_text` column.
 
 # COMMAND ----------
 
-from databricks.sdk import WorkspaceClient
-import mlflow.deployments
+# Write source table with Change Data Feed enabled for Delta Sync
+song_metadata_df.write.mode("overwrite").option("overwriteSchema", "true").option("delta.enableChangeDataFeed", "true").saveAsTable(SOURCE_TABLE)
 
-# Initialize the deployments client for Foundation Model APIs
-client = mlflow.deployments.get_deploy_client("databricks")
+# Ensure CDF is enabled (in case table already existed)
+spark.sql(f"ALTER TABLE {SOURCE_TABLE} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
 
-def get_embeddings(texts):
-    """Generate embeddings using the Foundation Model endpoint."""
-    response = client.predict(
-        endpoint=EMBEDDING_MODEL,
-        inputs={"input": texts}
-    )
-    return [item["embedding"] for item in response["data"]]
+print(f"Source table created: {SOURCE_TABLE}")
+print(f"Row count: {spark.table(SOURCE_TABLE).count()}")
 
 # COMMAND ----------
 
-# Convert to Pandas for embedding generation (for smaller datasets)
-# For large datasets, use Spark UDFs or batch processing
-songs_pd = song_metadata_df.toPandas()
-
-print(f"Generating embeddings for {len(songs_pd)} songs...")
-
-# COMMAND ----------
-
-# Generate embeddings in batches
-BATCH_SIZE = 50
-all_embeddings = []
-
-for i in range(0, len(songs_pd), BATCH_SIZE):
-    batch_texts = songs_pd["metadata_text"].iloc[i:i+BATCH_SIZE].tolist()
-    batch_embeddings = get_embeddings(batch_texts)
-    all_embeddings.extend(batch_embeddings)
-    print(f"Processed {min(i+BATCH_SIZE, len(songs_pd))}/{len(songs_pd)} songs")
-
-songs_pd["embedding"] = all_embeddings
-
-# COMMAND ----------
-
-# Convert back to Spark DataFrame
-from pyspark.sql.types import ArrayType, FloatType
-
-# Create schema for the embedding column
-embedding_schema = ArrayType(FloatType())
-
-# Convert to Spark DataFrame
-songs_with_embeddings = spark.createDataFrame(songs_pd)
-
-# Write to Delta table
-songs_with_embeddings.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(SOURCE_TABLE)
-
-print(f"Embedding source table created: {SOURCE_TABLE}")
-
-# COMMAND ----------
-
-# Verify the embeddings
+# Verify the source table
 display(
     spark.table(SOURCE_TABLE)
-    .select("song_id", "title", "genre", F.size("embedding").alias("embedding_dim"))
+    .select("song_id", "title", "genre", "metadata_text")
     .limit(5)
 )
 
@@ -244,12 +202,23 @@ def wait_for_endpoint(endpoint_name, timeout=600):
     """Wait for endpoint to be ready."""
     start_time = time.time()
     while time.time() - start_time < timeout:
-        endpoint = vsc.get_endpoint(endpoint_name)
-        status = endpoint.get("endpoint_status", {}).get("state", "UNKNOWN")
-        if status == "ONLINE":
-            print(f"Endpoint '{endpoint_name}' is ONLINE")
-            return True
-        print(f"Endpoint status: {status}. Waiting...")
+        try:
+            endpoint = vsc.get_endpoint(endpoint_name)
+            # Handle both dict and object return types
+            if isinstance(endpoint, dict):
+                status = endpoint.get("endpoint_status", {}).get("state", "UNKNOWN")
+            else:
+                endpoint_status = getattr(endpoint, 'endpoint_status', None)
+                if endpoint_status:
+                    status = getattr(endpoint_status, 'state', 'UNKNOWN')
+                else:
+                    status = "UNKNOWN"
+            if status == "ONLINE":
+                print(f"Endpoint '{endpoint_name}' is ONLINE")
+                return True
+            print(f"Endpoint status: {status}. Waiting...")
+        except Exception as e:
+            print(f"Error checking endpoint status: {e}")
         time.sleep(30)
     raise TimeoutError(f"Endpoint '{endpoint_name}' did not become ready within {timeout} seconds")
 
@@ -275,15 +244,16 @@ except:
 
 # COMMAND ----------
 
-# Create the Delta Sync index
+# Create the Delta Sync index with computed embeddings
+# This allows VECTOR_SEARCH SQL function to auto-embed text queries
 index = vsc.create_delta_sync_index(
     endpoint_name=VS_ENDPOINT_NAME,
     index_name=VS_INDEX_NAME,
     source_table_name=SOURCE_TABLE,
     pipeline_type="TRIGGERED",  # Manual sync trigger
     primary_key="song_id",
-    embedding_dimension=EMBEDDING_DIM,
-    embedding_vector_column="embedding",
+    embedding_source_column="metadata_text",  # Text column to embed
+    embedding_model_endpoint_name=EMBEDDING_MODEL,  # Foundation Model for embeddings
     # Columns to include in search results
     columns_to_sync=["song_id", "title", "artist_name", "genre", "songwriter_names", "publisher", "metadata_text"]
 )
@@ -296,14 +266,48 @@ print(f"Vector Search index created: {VS_INDEX_NAME}")
 def wait_for_index(endpoint_name, index_name, timeout=1200):
     """Wait for index to be ready."""
     start_time = time.time()
+    first_check = True
     while time.time() - start_time < timeout:
         try:
             index = vsc.get_index(endpoint_name, index_name)
-            status = index.get("status", {}).get("detailed_state", "UNKNOWN")
-            if status == "ONLINE":
-                print(f"Index '{index_name}' is ONLINE")
+
+            # Debug: print available attributes on first check
+            if first_check:
+                print(f"Index object type: {type(index)}")
+                print(f"Index attributes: {[a for a in dir(index) if not a.startswith('_')]}")
+                first_check = False
+
+            # Try multiple ways to get status
+            status = None
+            detailed_state = "UNKNOWN"
+
+            # Method 1: Direct attribute access
+            if hasattr(index, 'status'):
+                status = index.status
+                if hasattr(status, 'detailed_state'):
+                    detailed_state = status.detailed_state
+                elif hasattr(status, 'ready'):
+                    detailed_state = "ONLINE" if status.ready else "PROVISIONING"
+
+            # Method 2: Try index_status attribute
+            elif hasattr(index, 'index_status'):
+                status = index.index_status
+                if isinstance(status, str):
+                    detailed_state = status
+                elif hasattr(status, 'detailed_state'):
+                    detailed_state = status.detailed_state
+
+            # Method 3: describe() method
+            elif hasattr(index, 'describe'):
+                desc = index.describe()
+                if isinstance(desc, dict):
+                    detailed_state = desc.get('status', {}).get('detailed_state', 'UNKNOWN')
+
+            # Accept any ONLINE state (ONLINE, ONLINE_NO_PENDING_UPDATE, etc.)
+            if detailed_state.startswith("ONLINE"):
+                print(f"Index '{index_name}' is {detailed_state}")
                 return True
-            print(f"Index status: {status}. Waiting...")
+            print(f"Index status: {detailed_state}. Waiting...")
         except Exception as e:
             print(f"Error checking index status: {e}")
         time.sleep(30)
@@ -322,13 +326,11 @@ wait_for_index(VS_ENDPOINT_NAME, VS_INDEX_NAME)
 
 def search_songs(query_text, num_results=5):
     """Search for songs using semantic similarity."""
-    # Get embedding for the query
-    query_embedding = get_embeddings([query_text])[0]
-
-    # Search the index
+    # With computed embeddings, we pass query_text directly
+    # The index will automatically embed the query using the configured model
     index = vsc.get_index(VS_ENDPOINT_NAME, VS_INDEX_NAME)
     results = index.similarity_search(
-        query_vector=query_embedding,
+        query_text=query_text,
         num_results=num_results,
         columns=["song_id", "title", "artist_name", "genre", "songwriter_names"]
     )
@@ -371,33 +373,37 @@ for row in results.get("result", {}).get("data_array", []):
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC -- Create a function that wraps the vector search for agent tool use
-# MAGIC CREATE OR REPLACE FUNCTION gmr_demo.royalties.search_song_catalog(
-# MAGIC   query STRING COMMENT 'Natural language description of songs to find'
-# MAGIC )
-# MAGIC RETURNS TABLE (
-# MAGIC   song_id STRING,
-# MAGIC   title STRING,
-# MAGIC   artist_name STRING,
-# MAGIC   genre STRING,
-# MAGIC   songwriter_names STRING,
-# MAGIC   similarity_score DOUBLE
-# MAGIC )
-# MAGIC COMMENT 'Search the GMR song catalog using semantic similarity. Use this to find songs matching descriptions like "upbeat pop songs" or "acoustic ballads about love".'
-# MAGIC RETURN
-# MAGIC   SELECT
-# MAGIC     song_id,
-# MAGIC     title,
-# MAGIC     artist_name,
-# MAGIC     genre,
-# MAGIC     songwriter_names,
-# MAGIC     score AS similarity_score
-# MAGIC   FROM VECTOR_SEARCH(
-# MAGIC     index => 'gmr_demo.royalties.song_metadata_index',
-# MAGIC     query => query,
-# MAGIC     num_results => 10
-# MAGIC   );
+# Create the UC function using Python to leverage the variables
+search_function_sql = f"""
+CREATE OR REPLACE FUNCTION {CATALOG}.{SCHEMA}.search_song_catalog(
+  query STRING COMMENT 'Natural language description of songs to find'
+)
+RETURNS TABLE (
+  song_id STRING,
+  title STRING,
+  artist_name STRING,
+  genre STRING,
+  songwriter_names STRING,
+  similarity_score DOUBLE
+)
+COMMENT 'Search the GMR song catalog using semantic similarity. Use this to find songs matching descriptions like "upbeat pop songs" or "acoustic ballads about love".'
+RETURN
+  SELECT
+    song_id,
+    title,
+    artist_name,
+    genre,
+    songwriter_names,
+    search_score AS similarity_score
+  FROM VECTOR_SEARCH(
+    index => '{VS_INDEX_NAME}',
+    query => query,
+    num_results => 10
+  )
+"""
+
+spark.sql(search_function_sql)
+print(f"Created search function: {CATALOG}.{SCHEMA}.search_song_catalog")
 
 # COMMAND ----------
 
@@ -420,6 +426,7 @@ for row in results.get("result", {}).get("data_array", []):
 
 # COMMAND ----------
 
+songs_count = spark.table(SOURCE_TABLE).count()
 print(f"""
 Vector Search Setup Complete!
 =============================
@@ -427,9 +434,8 @@ Endpoint: {VS_ENDPOINT_NAME}
 Index: {VS_INDEX_NAME}
 Source Table: {SOURCE_TABLE}
 Embedding Model: {EMBEDDING_MODEL}
-Embedding Dimensions: {EMBEDDING_DIM}
 
-Songs Indexed: {songs_pd.shape[0]}
+Songs Indexed: {songs_count}
 
 Test the search in the Unity Catalog:
   SELECT * FROM search_song_catalog('upbeat pop songs')

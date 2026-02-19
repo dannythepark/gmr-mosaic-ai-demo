@@ -22,7 +22,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "gmr_demo", "Catalog Name")
+dbutils.widgets.text("catalog", "gmr_demo_catalog", "Catalog Name")
 dbutils.widgets.text("schema", "royalties", "Schema Name")
 
 CATALOG = dbutils.widgets.get("catalog")
@@ -293,28 +293,14 @@ display(song_features_df.limit(20))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Register as Feature Store Table
+# MAGIC ### Save as Delta Table
 
 # COMMAND ----------
 
-from databricks.feature_engineering import FeatureEngineeringClient
+# Save song features as Delta table
+spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{SCHEMA}.song_features")
 
-fe = FeatureEngineeringClient()
-
-# Drop the feature table if it exists (for idempotent execution)
-try:
-    spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{SCHEMA}.song_features")
-except:
-    pass
-
-# Create the feature table
-feature_table = fe.create_table(
-    name=f"{CATALOG}.{SCHEMA}.song_features",
-    primary_keys=["song_id"],
-    timestamp_keys=["feature_timestamp"],
-    df=song_features_df,
-    description="ML features for GMR songs including popularity, royalty efficiency, territory distribution"
-)
+song_features_df.write.mode("overwrite").saveAsTable(f"{CATALOG}.{SCHEMA}.song_features")
 
 print(f"Feature table created: {CATALOG}.{SCHEMA}.song_features")
 
@@ -335,20 +321,10 @@ display(spark.table(f"{CATALOG}.{SCHEMA}.song_features").limit(10))
 # Add timestamp column
 licensee_features_df = licensee_risk_df.withColumn("feature_timestamp", F.current_timestamp())
 
-# Drop if exists
-try:
-    spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{SCHEMA}.licensee_features")
-except:
-    pass
+# Save licensee features as Delta table
+spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{SCHEMA}.licensee_features")
 
-# Create licensee feature table
-licensee_feature_table = fe.create_table(
-    name=f"{CATALOG}.{SCHEMA}.licensee_features",
-    primary_keys=["licensee_name"],
-    timestamp_keys=["feature_timestamp"],
-    df=licensee_features_df,
-    description="ML features for GMR licensees including payment reliability and risk scores"
-)
+licensee_features_df.write.mode("overwrite").saveAsTable(f"{CATALOG}.{SCHEMA}.licensee_features")
 
 print(f"Feature table created: {CATALOG}.{SCHEMA}.licensee_features")
 

@@ -4,7 +4,7 @@
 -- MAGIC
 -- MAGIC **Business Context:** As a data analyst at GMR, you can now leverage Large Language Models
 -- MAGIC directly in SQL queries using Databricks AI Functions. No Python required! This enables:
--- MAGIC - **Genre classification** from song titles and metadata
+-- MAGIC - **Mood classification** for sync licensing opportunities
 -- MAGIC - **Entity extraction** from license documents
 -- MAGIC - **Automated summarization** of royalty disputes
 -- MAGIC - **Sentiment analysis** on partner communications
@@ -24,49 +24,50 @@
 
 -- COMMAND ----------
 
-USE CATALOG gmr_demo;
+USE CATALOG gmr_demo_catalog;
 USE SCHEMA royalties;
 
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## 1. Genre Classification with `ai_classify`
+-- MAGIC ## 1. Mood Classification with `ai_classify`
 -- MAGIC
--- MAGIC Automatically classify songs into genres based on their title and artist.
--- MAGIC This is useful for quality checking metadata or filling in missing genre information.
+-- MAGIC Classify songs by mood for sync licensing opportunities. Music supervisors searching
+-- MAGIC for songs for TV, film, or commercials need to find tracks by emotional tone, not just genre.
+-- MAGIC This adds a dimension that doesn't exist in the catalog today.
 
 -- COMMAND ----------
 
--- Classify songs into genres based on title
+-- Classify songs by mood for sync licensing
 SELECT
   song_id,
   title,
   artist_name,
-  genre AS current_genre,
+  genre,
   ai_classify(
-    CONCAT('Song: "', title, '" by ', artist_name),
-    ARRAY('Pop', 'Rock', 'Hip-Hop', 'Country', 'R&B', 'Electronic', 'Jazz', 'Classical', 'Latin', 'Indie')
-  ) AS predicted_genre
+    CONCAT('Song: "', title, '" by ', artist_name, ' (Genre: ', genre, ')'),
+    ARRAY('Upbeat', 'Melancholy', 'Energetic', 'Romantic', 'Dark', 'Chill')
+  ) AS mood
 FROM songs
 LIMIT 20;
 
 -- COMMAND ----------
 
--- Find songs where predicted genre differs from assigned genre
+-- Find romantic songs across all genres for a sync licensing request
 SELECT
   song_id,
   title,
   artist_name,
-  genre AS assigned_genre,
+  genre,
   ai_classify(
-    CONCAT('Song: "', title, '" by ', artist_name),
-    ARRAY('Pop', 'Rock', 'Hip-Hop', 'Country', 'R&B', 'Electronic', 'Jazz', 'Classical', 'Latin', 'Indie')
-  ) AS predicted_genre
+    CONCAT('Song: "', title, '" by ', artist_name, ' (Genre: ', genre, ')'),
+    ARRAY('Upbeat', 'Melancholy', 'Energetic', 'Romantic', 'Dark', 'Chill')
+  ) AS mood
 FROM songs
-WHERE genre != ai_classify(
-    CONCAT('Song: "', title, '" by ', artist_name),
-    ARRAY('Pop', 'Rock', 'Hip-Hop', 'Country', 'R&B', 'Electronic', 'Jazz', 'Classical', 'Latin', 'Indie')
-  )
+WHERE ai_classify(
+    CONCAT('Song: "', title, '" by ', artist_name, ' (Genre: ', genre, ')'),
+    ARRAY('Upbeat', 'Melancholy', 'Energetic', 'Romantic', 'Dark', 'Chill')
+  ) = 'Romantic'
 LIMIT 10;
 
 -- COMMAND ----------
@@ -251,7 +252,7 @@ WHERE ai_classify(email_body, ARRAY('positive', 'neutral', 'negative', 'escalati
 WITH reference_song AS (
   SELECT metadata_text
   FROM song_metadata_embeddings
-  WHERE title = 'Midnight Dreams'
+  WHERE title = 'Bohemian Rhapsody'
   LIMIT 1
 )
 SELECT
@@ -262,39 +263,35 @@ SELECT
   ai_similarity(s.metadata_text, r.metadata_text) AS similarity_score
 FROM song_metadata_embeddings s
 CROSS JOIN reference_song r
-WHERE s.title != 'Midnight Dreams'
+WHERE s.title != 'Bohemian Rhapsody'
 ORDER BY similarity_score DESC
 LIMIT 10;
 
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## 6. Batch Classification for Data Quality
+-- MAGIC ## 6. Batch Mood Tagging for Sync Licensing
 
 -- COMMAND ----------
 
--- Identify potentially mislabeled songs using AI classification
+-- Mood distribution across the catalog - what's our sync licensing inventory?
+WITH song_moods AS (
+  SELECT
+    genre,
+    ai_classify(
+      CONCAT('Song: "', title, '" by ', artist_name, ' (Genre: ', genre, ')'),
+      ARRAY('Upbeat', 'Melancholy', 'Energetic', 'Romantic', 'Dark', 'Chill')
+    ) AS mood
+  FROM songs
+)
 SELECT
-  genre,
-  COUNT(*) AS total_songs,
-  SUM(CASE
-    WHEN genre = ai_classify(
-      CONCAT('Song: "', title, '" by ', artist_name),
-      ARRAY('Pop', 'Rock', 'Hip-Hop', 'Country', 'R&B', 'Electronic', 'Jazz', 'Classical', 'Latin', 'Indie')
-    ) THEN 1 ELSE 0
-  END) AS correctly_labeled,
-  ROUND(
-    100.0 * SUM(CASE
-      WHEN genre = ai_classify(
-        CONCAT('Song: "', title, '" by ', artist_name),
-        ARRAY('Pop', 'Rock', 'Hip-Hop', 'Country', 'R&B', 'Electronic', 'Jazz', 'Classical', 'Latin', 'Indie')
-      ) THEN 1 ELSE 0
-    END) / COUNT(*),
-    1
-  ) AS accuracy_pct
-FROM songs
-GROUP BY genre
-ORDER BY accuracy_pct;
+  mood,
+  COUNT(*) AS song_count,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct_of_catalog,
+  CONCAT_WS(', ', COLLECT_SET(genre)) AS genres_represented
+FROM song_moods
+GROUP BY mood
+ORDER BY song_count DESC;
 
 -- COMMAND ----------
 
@@ -303,7 +300,7 @@ ORDER BY accuracy_pct;
 -- MAGIC
 -- MAGIC This notebook demonstrated how to use AI Functions in SQL for:
 -- MAGIC
--- MAGIC 1. **Genre Classification** - Automatically classify songs and detect mislabeled data
+-- MAGIC 1. **Mood Classification** - Tag songs by mood for sync licensing (Upbeat, Melancholy, Romantic, etc.)
 -- MAGIC 2. **Entity Extraction** - Pull structured data from unstructured license documents
 -- MAGIC 3. **Text Generation** - Create executive summaries and personalized notifications
 -- MAGIC 4. **Sentiment Analysis** - Triage partner communications by urgency

@@ -13,7 +13,7 @@ This demo showcases how to build, evaluate, deploy, and govern an AI agent using
 │                         GMR Royalty Assistant                           │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  User Query ──► LLM (Llama/Claude) ──► Tool Selection ──► Response     │
+│  User Query ──► LLM ──► Tool Selection ──► Response                    │
 │                        │                     │                          │
 │                        ▼                     ▼                          │
 │              ┌─────────────────┐   ┌──────────────────┐                │
@@ -40,7 +40,7 @@ This demo showcases how to build, evaluate, deploy, and govern an AI agent using
 
 ### 2. Build Agent
 - **UC Function Tools** - SQL/Python functions for data queries
-- **Foundation Model** - LLM backbone (Llama 3.3 70B or Claude Sonnet)
+- **Foundation Model** - LLM backbone (Claude Sonnet 4.5)
 - **Function Calling** - Intelligent tool selection based on user intent
 - **AI Functions** - SQL-native AI (classify, extract, generate)
 
@@ -66,7 +66,7 @@ This demo showcases how to build, evaluate, deploy, and govern an AI agent using
 ### Prerequisites
 
 - Databricks workspace with Unity Catalog enabled
-- Access to Foundation Model APIs (Llama 3.3 70B or Claude)
+- Access to Foundation Model APIs (Claude Sonnet 4.5)
 - Vector Search endpoint capability
 - Serverless SQL Warehouse
 
@@ -150,20 +150,21 @@ gmr-mosaic-ai-demo/
 | `search_song_catalog` | Semantic song search (Vector Search) |
 | `calculate_royalty_split` | Per-songwriter payment breakdown |
 | `get_licensing_summary` | Licensing stats by song/artist |
-| `flag_payment_anomaly` | Detect unusual payment patterns |
+| `lookup_songwriter_earnings` | Get earnings summary for a songwriter |
+| `get_top_royalty_songs` | Ranked list of highest-earning songs |
 
 ## Sample Queries
 
 Once deployed, try these queries with the agent:
 
 ```
-"What were the total royalties paid for 'Midnight Dreams' in Q3 2025?"
+"What are the royalties for Bohemian Rhapsody?"
 
 "Find upbeat pop songs similar to summer anthems"
 
-"Calculate the royalty split for a $10,000 payment on SONG000001"
+"What are the top 10 highest-earning songs?"
 
-"Are there any payment anomalies for Spotify USA Inc.?"
+"Calculate the royalty split for a $10,000 payment on SONG000001"
 
 "Which territories generate the most licensing revenue?"
 ```
@@ -201,7 +202,7 @@ Set these in your `databricks.yml` or as widgets:
 
 Edit `07_build_agent.py`:
 ```python
-LLM_ENDPOINT = "databricks-claude-sonnet-4"  # or other endpoint
+LLM_ENDPOINT = "databricks-claude-sonnet-4-5"  # or other Foundation Model API endpoint
 ```
 
 ## Troubleshooting
